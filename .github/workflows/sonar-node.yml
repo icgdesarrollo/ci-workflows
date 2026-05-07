@@ -1,0 +1,49 @@
+name: SonarCloud Node.js (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        required: false
+        type: string
+        default: '20'
+      package-manager:
+        required: false
+        type: string
+        default: 'npm'
+        description: 'Either "npm", "yarn", or "pnpm"'
+      test-command:
+        required: false
+        type: string
+        default: 'test -- --coverage'
+        description: 'The command to run tests with coverage (after the package manager prefix)'
+    secrets:
+      SONAR_TOKEN:
+        required: true
+
+jobs:
+  build:
+    name: Build and analyze
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: ${{ inputs.package-manager }}
+
+      - name: Install dependencies
+        run: ${{ inputs.package-manager }} install
+
+      - name: Run tests with coverage
+        run: ${{ inputs.package-manager }} run ${{ inputs.test-command }}
+
+      - name: SonarCloud Scan
+        uses: SonarSource/sonarqube-scan-action@v4
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
