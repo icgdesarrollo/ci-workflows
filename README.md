@@ -19,6 +19,19 @@ Configurar SonarCloud y CI en un proyecto nuevo solía requerir copiar y pegar 3
 | `sonar-node.yml` | Node.js (JavaScript / TypeScript) |
 | `sonar-python.yml` | Python |
 
+## ¿Dónde se configura Sonar en cada stack?
+
+La configuración de Sonar vive en un archivo distinto según el stack. Esto es importante porque el scanner solo lee el archivo correspondiente a tu stack:
+
+| Stack | Archivo de configuración |
+|---|---|
+| Java + Maven | Propiedades dentro de `pom.xml` |
+| Java + Gradle | Bloque `sonar { }` en `build.gradle` o `build.gradle.kts` |
+| Node.js | `sonar-project.properties` en la raíz |
+| Python | `sonar-project.properties` en la raíz |
+
+> **Nota para Java**: técnicamente el scanner puede leer `sonar-project.properties`, pero los plugins de Maven y Gradle inyectan las propiedades del `pom.xml`/`build.gradle` como argumentos CLI, que tienen **mayor prioridad**. Si tienes ambos, el `.properties` queda como código muerto y se desincroniza fácilmente. La convención en Java es configurar Sonar dentro del build tool, así que evita crear `sonar-project.properties` en estos proyectos.
+
 ## Pre-requisitos comunes (todos los stacks)
 
 Antes de usar cualquier workflow:
@@ -152,7 +165,6 @@ jacocoTestReport {
     reports {
         xml.required = true
     }
-    dependsOn test
 }
 
 test {
@@ -160,6 +172,8 @@ test {
     finalizedBy jacocoTestReport
 }
 ```
+
+> Nota: usamos `finalizedBy jacocoTestReport` en la tarea `test` para encadenar la generación del reporte. No es necesario agregar también `dependsOn test` dentro de `jacocoTestReport`, ya que en versiones recientes de Gradle puede generar warnings de dependencia.
 
 ### 2. Si usas `build.gradle.kts` (Kotlin DSL)
 
@@ -182,7 +196,6 @@ tasks.jacocoTestReport {
     reports {
         xml.required.set(true)
     }
-    dependsOn(tasks.test)
 }
 
 tasks.test {
@@ -408,6 +421,8 @@ sonar.python.version=3.12
 sonar.sourceEncoding=UTF-8
 ```
 
+> **Nota sobre `tests/`**: aunque `sonar.tests=tests` indica a Sonar que esa carpeta contiene tests, también la incluimos en `sonar.exclusions` para que no se analice como código productivo. Sonar la seguirá reconociendo como carpeta de tests gracias a `sonar.tests`.
+
 > **Tip**: si tu código no está en la raíz sino en una carpeta como `app/` o `src/`, ajusta `sonar.sources` y el `--cov=.` del pytest a esa ruta.
 
 ### 4. Crea `.github/workflows/build.yml`
@@ -454,6 +469,35 @@ Confirma que existe `coverage.xml`.
 
 ---
 
+## Monorepos y proyectos multi-módulo
+
+Si tu repo contiene varios módulos o sub-proyectos, hay dos enfoques posibles:
+
+### Opción A: un solo proyecto en SonarCloud (recomendado para la mayoría de casos)
+
+Trata todo el monorepo como un único proyecto de Sonar. Solo necesitas ajustar las rutas de fuentes, tests y reportes para que apunten a todos los módulos.
+
+**Ejemplo Node.js** (monorepo con `packages/api` y `packages/web`):
+
+```properties
+sonar.projectKey=icgdesarrollo_mi-monorepo
+sonar.organization=icgdesarrollo
+
+sonar.sources=packages/api/src,packages/web/src
+sonar.tests=packages/api/src,packages/web/src
+sonar.exclusions=**/node_modules/**,**/dist/**,**/coverage/**
+
+sonar.javascript.lcov.reportPaths=packages/api/coverage/lcov.info,packages/web/coverage/lcov.info
+```
+
+**Ejemplo Maven multi-módulo**: SonarCloud lo detecta automáticamente con `mvn verify sonar:sonar` desde el `pom.xml` padre. Asegúrate de que el plugin de JaCoCo esté en el `pom.xml` padre (en `<pluginManagement>`) para que se herede a los módulos hijos.
+
+### Opción B: un proyecto por módulo en SonarCloud
+
+Útil si cada módulo tiene equipos o quality gates distintos. En este caso necesitas un workflow por módulo y cada uno apunta a un `projectKey` diferente. Habla con el equipo de plataforma antes de elegir esta opción para evitar fragmentar dashboards.
+
+---
+
 ## Solución de problemas comunes
 
 ### "No data available to display" en la tarjeta de Coverage
@@ -475,6 +519,10 @@ Revisa que `sonar.projectKey` y `sonar.organization` coincidan exactamente con l
 ### El test `xxx` falla en CI pero pasa local
 
 Suele ser por dependencias del filesystem (rutas con `\` en Windows) o de variables de entorno. El runner de GitHub Actions corre en Ubuntu por defecto.
+
+### "Circular dependency detected" en Gradle
+
+Asegúrate de no tener `dependsOn(tasks.test)` dentro de `jacocoTestReport` y `finalizedBy(tasks.jacocoTestReport)` dentro de `test` al mismo tiempo. Deja solo `finalizedBy` en la tarea `test`.
 
 ---
 
