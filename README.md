@@ -15,7 +15,6 @@ Configurar SonarCloud y CI en un proyecto nuevo solía requerir copiar y pegar 3
 | Workflow | Stack |
 |---|---|
 | `sonar-java-maven.yml` | Java + Maven |
-| `sonar-java-gradle.yml` | Java + Gradle |
 | `sonar-node.yml` | Node.js (JavaScript / TypeScript) |
 | `sonar-python.yml` | Python |
 
@@ -26,11 +25,10 @@ La configuración de Sonar vive en un archivo distinto según el stack. Esto es 
 | Stack | Archivo de configuración |
 |---|---|
 | Java + Maven | Propiedades dentro de `pom.xml` |
-| Java + Gradle | Bloque `sonar { }` en `build.gradle` o `build.gradle.kts` |
 | Node.js | `sonar-project.properties` en la raíz |
 | Python | `sonar-project.properties` en la raíz |
 
-> **Nota para Java**: técnicamente el scanner puede leer `sonar-project.properties`, pero los plugins de Maven y Gradle inyectan las propiedades del `pom.xml`/`build.gradle` como argumentos CLI, que tienen **mayor prioridad**. Si tienes ambos, el `.properties` queda como código muerto y se desincroniza fácilmente. La convención en Java es configurar Sonar dentro del build tool, así que evita crear `sonar-project.properties` en estos proyectos.
+> **Nota para Java**: técnicamente el scanner puede leer `sonar-project.properties`, pero los plugins de Maven inyectan las propiedades del `pom.xml` como argumentos CLI, que tienen **mayor prioridad**. Si tienes ambos, el `.properties` queda como código muerto y se desincroniza fácilmente. La convención en Java es configurar Sonar dentro del build tool, así que evita crear `sonar-project.properties` en estos proyectos.
 
 ## Pre-requisitos comunes (todos los stacks)
 
@@ -132,105 +130,6 @@ mvn clean verify
 ```
 
 Confirma que existe el archivo `target/site/jacoco/jacoco.xml`. Si no existe, JaCoCo no se está ejecutando.
-
----
-
-## Java + Gradle
-
-### 1. Configura tu `build.gradle` (Groovy DSL)
-
-Agrega los plugins:
-
-```groovy
-plugins {
-    id "org.sonarqube" version "5.1.0.4882"
-    id "jacoco"
-    // ... tus otros plugins
-}
-```
-
-Configura Sonar y JaCoCo:
-
-```groovy
-sonar {
-    properties {
-        property "sonar.projectKey", "icgdesarrollo_NOMBRE_DEL_REPO"
-        property "sonar.organization", "icgdesarrollo"
-        property "sonar.host.url", "https://sonarcloud.io"
-        property "sonar.coverage.jacoco.xmlReportPaths", "build/reports/jacoco/test/jacocoTestReport.xml"
-    }
-}
-
-jacocoTestReport {
-    reports {
-        xml.required = true
-    }
-}
-
-test {
-    useJUnitPlatform()
-    finalizedBy jacocoTestReport
-}
-```
-
-> Nota: usamos `finalizedBy jacocoTestReport` en la tarea `test` para encadenar la generación del reporte. No es necesario agregar también `dependsOn test` dentro de `jacocoTestReport`, ya que en versiones recientes de Gradle puede generar warnings de dependencia.
-
-### 2. Si usas `build.gradle.kts` (Kotlin DSL)
-
-```kotlin
-plugins {
-    id("org.sonarqube") version "5.1.0.4882"
-    jacoco
-}
-
-sonar {
-    properties {
-        property("sonar.projectKey", "icgdesarrollo_NOMBRE_DEL_REPO")
-        property("sonar.organization", "icgdesarrollo")
-        property("sonar.host.url", "https://sonarcloud.io")
-        property("sonar.coverage.jacoco.xmlReportPaths", "build/reports/jacoco/test/jacocoTestReport.xml")
-    }
-}
-
-tasks.jacocoTestReport {
-    reports {
-        xml.required.set(true)
-    }
-}
-
-tasks.test {
-    useJUnitPlatform()
-    finalizedBy(tasks.jacocoTestReport)
-}
-```
-
-### 3. Crea `.github/workflows/build.yml`
-
-```yaml
-name: Build & SonarCloud
-
-on:
-  push:
-    branches: [main]
-  pull_request:
-    types: [opened, synchronize, reopened]
-
-jobs:
-  sonar:
-    uses: icgdesarrollo/ci-workflows/.github/workflows/sonar-java-gradle.yml@main
-    secrets:
-      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-```
-
-### 4. Verifica el reporte de cobertura
-
-Ejecuta localmente:
-
-```bash
-./gradlew build jacocoTestReport
-```
-
-Confirma que existe `build/reports/jacoco/test/jacocoTestReport.xml`.
 
 ---
 
