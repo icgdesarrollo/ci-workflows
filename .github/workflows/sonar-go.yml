@@ -1,0 +1,41 @@
+name: SonarCloud Go (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      go-version-file:
+        required: false
+        type: string
+        default: 'go.mod'
+        description: 'File the Go version is read from (go.mod or .go-version)'
+      test-command:
+        required: false
+        type: string
+        default: 'go test ./... -coverprofile=coverage.out -json > test-report.json'
+        description: 'Must write coverage.out and test-report.json, the paths read by sonar-project.properties'
+    secrets:
+      SONAR_TOKEN:
+        required: true
+
+jobs:
+  build:
+    name: Build and analyze
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ inputs.go-version-file }}
+
+      - name: Run tests with coverage
+        run: ${{ inputs.test-command }}
+
+      - name: SonarCloud Scan
+        uses: SonarSource/sonarqube-scan-action@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
