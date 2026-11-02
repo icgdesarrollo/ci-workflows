@@ -29,6 +29,10 @@ on:
         description: "Build args, uno por línea (KEY=VALUE)"
         type: string
         default: ""
+      maven-github-packages:
+        description: "Arma un settings.xml para GitHub Packages y lo pasa al build como secreto 'maven_settings'"
+        type: boolean
+        default: false
       extra-tag:
         description: "Tag adicional opcional (ej. dev, test-123)"
         type: string
@@ -47,6 +51,9 @@ on:
         required: true
       DOCKERHUB_TOKEN:
         required: true
+      GH_PACKAGES_TOKEN:
+        description: "PAT clasico con read:packages. Obligatorio si maven-github-packages es true"
+        required: false
     outputs:
       digest:
         description: "Digest de la imagen publicada"
@@ -101,6 +108,33 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ github.ref_name }}
 
+      # El registro Maven de GitHub Packages es repository-scoped: el GITHUB_TOKEN
+      # del job NO puede leer paquetes de otro repositorio aunque sea de la misma
+      # organizacion, asi que no alcanza con pedir permissions: packages: read.
+      # Hace falta un PAT clasico.
+      - name: Preparar credenciales de GitHub Packages
+        if: inputs.maven-github-packages
+        env:
+          USUARIO: ${{ github.repository_owner }}
+          TOKEN: ${{ secrets.GH_PACKAGES_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::error::maven-github-packages es true pero falta el secreto GH_PACKAGES_TOKEN"
+            exit 1
+          fi
+          umask 077
+          cat > "${RUNNER_TEMP}/settings.xml" <<EOF
+          <settings>
+            <servers>
+              <server>
+                <id>github</id>
+                <username>${USUARIO}</username>
+                <password>${TOKEN}</password>
+              </server>
+            </servers>
+          </settings>
+          EOF
+
       - name: Build and push image
         id: build
         uses: docker/build-push-action@v7
@@ -110,6 +144,8 @@ jobs:
           push: ${{ inputs.push }}
           platforms: ${{ inputs.platforms }}
           build-args: ${{ inputs.build-args }}
+          # Secreto y no build-arg: un build-arg queda en el historial de la imagen.
+          secret-files: ${{ inputs.maven-github-packages && format('maven_settings={0}/settings.xml', runner.temp) || '' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
