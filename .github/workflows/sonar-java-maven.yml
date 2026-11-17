@@ -10,6 +10,13 @@ on:
     secrets:
       SONAR_TOKEN:
         required: true
+      # Obligatorio solo para los proyectos cuyo pom resuelve dependencias desde
+      # GitHub Packages. Un PAT clasico con read:packages; el registro Maven de
+      # GitHub Packages es repository-scoped, asi que el GITHUB_TOKEN del job NO
+      # puede leer paquetes de otro repositorio aunque sea de la misma
+      # organizacion.
+      GH_PACKAGES_TOKEN:
+        required: false
 
 jobs:
   build:
@@ -25,6 +32,13 @@ jobs:
         with:
           java-version: ${{ inputs.java-version }}
           distribution: temurin
+          # Deja un settings.xml con un servidor de id 'github', el mismo id que
+          # declaran los pom que leen de GitHub Packages. Los dos valores de
+          # abajo son NOMBRES de variables de entorno, no los valores. Para un
+          # proyecto que no usa GitHub Packages esto no cambia nada.
+          server-id: github
+          server-username: MAVEN_USUARIO
+          server-password: MAVEN_TOKEN
 
       - name: Cache SonarCloud packages
         uses: actions/cache@v4
@@ -44,4 +58,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          MAVEN_USUARIO: ${{ github.repository_owner }}
+          MAVEN_TOKEN: ${{ secrets.GH_PACKAGES_TOKEN }}
         run: mvn -B verify org.sonarsource.scanner.maven:sonar-maven-plugin:sonar
