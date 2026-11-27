@@ -1,0 +1,202 @@
+name: Reusable - Docker build & push (GHCR)
+
+# Variante de docker-build-push.yml para GitHub Container Registry (ghcr.io).
+# Es un archivo aparte para no tocar a los proyectos que publican en Docker Hub.
+# El login usa el GITHUB_TOKEN del job: el llamador debe declarar permissions: packages: write.
+
+on:
+  workflow_call:
+    inputs:
+      image-name:
+        description: "Imagen en GHCR sin el registro, en minusculas (organizacion/nombre)"
+        type: string
+        required: true
+      image-title:
+        type: string
+        required: true
+      image-description:
+        type: string
+        default: ""
+      vendor:
+        type: string
+        default: "ICG"
+      context:
+        type: string
+        default: "."
+      dockerfile:
+        description: "Ruta del Dockerfile. Vacio: Dockerfile dentro del contexto"
+        type: string
+        default: ""
+      platforms:
+        type: string
+        default: "linux/amd64"
+      build-args:
+        description: "Build args, uno por línea (KEY=VALUE)"
+        type: string
+        default: ""
+      maven-github-packages:
+        description: "Arma un settings.xml para GitHub Packages y lo pasa al build como secreto 'maven_settings'"
+        type: boolean
+        default: false
+      npm-github-packages:
+        description: "Pasa GH_PACKAGES_TOKEN al build como secreto 'npm_token' (paquetes npm de GitHub Packages)"
+        type: boolean
+        default: false
+      latest:
+        description: "Agrega el tag latest en tags v* que no sean -rc. Apagado por defecto: con GitOps se despliega por tag de version"
+        type: boolean
+        default: false
+      extra-tag:
+        description: "Tag adicional opcional (ej. dev, test-123)"
+        type: string
+        default: ""
+      push:
+        type: boolean
+        default: true
+      runner:
+        type: string
+        default: "ubuntu-24.04"
+      timeout-minutes:
+        type: number
+        default: 30
+    secrets:
+      GH_PACKAGES_TOKEN:
+        description: "PAT clasico con read:packages. Obligatorio si maven-github-packages o npm-github-packages es true"
+        required: false
+    outputs:
+      digest:
+        description: "Digest de la imagen publicada"
+        value: ${{ jobs.docker.outputs.digest }}
+      tags:
+        description: "Tags generados"
+        value: ${{ jobs.docker.outputs.tags }}
+
+permissions:
+  contents: read
+
+jobs:
+  docker:
+    name: Build & push image (GHCR)
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      tags: ${{ steps.meta.outputs.tags }}
+
+    steps:
+      - name: Validar entradas
+        env:
+          IMAGE: ${{ inputs.image-name }}
+          NECESITA_TOKEN: ${{ inputs.maven-github-packages || inputs.npm-github-packages }}
+          TOKEN: ${{ secrets.GH_PACKAGES_TOKEN }}
+        run: |
+          # GHCR rechaza nombres con mayusculas; el registro lo agrega este workflow.
+          if ! printf '%s' "$IMAGE" | grep -Eq '^[a-z0-9]+([._-][a-z0-9]+)*/[a-z0-9]+([._-][a-z0-9]+)*$'; then
+            echo "::error::image-name debe ser organizacion/nombre en minusculas y sin el registro (recibido: $IMAGE)"
+            exit 1
+          fi
+          if [ "$NECESITA_TOKEN" = "true" ] && [ -z "$TOKEN" ]; then
+            echo "::error::maven-github-packages o npm-github-packages es true pero falta el secreto GH_PACKAGES_TOKEN"
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GitHub Container Registry
+        if: inputs.push
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ inputs.image-name }}
+          flavor: |
+            latest=false
+          tags: |
+            type=ref,event=tag
+            type=raw,value=latest,enable=${{ inputs.latest && startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-rc') }}
+            type=sha,enable=${{ !startsWith(github.ref, 'refs/tags/') }}
+            type=raw,value=${{ inputs.extra-tag }},enable=${{ inputs.extra-tag != '' }}
+          labels: |
+            org.opencontainers.image.title=${{ inputs.image-title }}
+            org.opencontainers.image.description=${{ inputs.image-description }}
+            org.opencontainers.image.vendor=${{ inputs.vendor }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+
+      # El registro Maven de GitHub Packages es repository-scoped: el GITHUB_TOKEN
+      # del job NO puede leer paquetes de otro repositorio aunque sea de la misma
+      # organizacion, asi que no alcanza con pedir permissions: packages: read.
+      # Hace falta un PAT clasico.
+      - name: Preparar credenciales de GitHub Packages (Maven)
+        if: inputs.maven-github-packages
+        env:
+          USUARIO: ${{ github.repository_owner }}
+          TOKEN: ${{ secrets.GH_PACKAGES_TOKEN }}
+        run: |
+          umask 077
+          cat > "${RUNNER_TEMP}/settings.xml" <<EOF
+          <settings>
+            <servers>
+              <server>
+                <id>github</id>
+                <username>${USUARIO}</username>
+                <password>${TOKEN}</password>
+              </server>
+            </servers>
+          </settings>
+          EOF
+
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          push: ${{ inputs.push }}
+          platforms: ${{ inputs.platforms }}
+          build-args: ${{ inputs.build-args }}
+          # Secretos y no build-args: un build-arg queda en el historial de la imagen.
+          secret-files: ${{ inputs.maven-github-packages && format('maven_settings={0}/settings.xml', runner.temp) || '' }}
+          secrets: ${{ inputs.npm-github-packages && format('npm_token={0}', secrets.GH_PACKAGES_TOKEN) || '' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+      - name: Write job summary
+        if: always()
+        env:
+          REPO: ghcr.io/${{ inputs.image-name }}
+          REF: ${{ github.ref_name }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+          PUSHED: ${{ inputs.push }}
+        run: |
+          {
+            echo "### Docker image build (GHCR)"
+            echo ""
+            echo "- **Repo:** \`$REPO\`"
+            echo "- **Git ref:** \`$REF\`"
+            echo "- **Push:** \`$PUSHED\`"
+            echo "- **Digest:** \`$DIGEST\`"
+            echo ""
+            echo "**Tags:**"
+            echo '```'
+            echo "$TAGS"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

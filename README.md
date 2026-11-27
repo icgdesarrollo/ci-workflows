@@ -19,6 +19,7 @@ Configurar SonarCloud y CI en un proyecto nuevo solía requerir copiar y pegar 3
 | `sonar-python.yml` | SonarCloud para Python | `v1.0.0` |
 | `sonar-go.yml` | SonarCloud para Go | `v1.2.0` |
 | `docker-build-push.yml` | Build y push de imágenes a Docker Hub | `v1.0.0` |
+| `docker-build-push-ghcr.yml` | Build y push de imágenes a GitHub Container Registry (GHCR) | `v1.3.0` |
 
 ## ¿Qué versión referenciar?
 
@@ -583,7 +584,82 @@ git ls-remote --tags https://github.com/icgdesarrollo/ci-workflows
 
 ---
 
-## Mantenimiento y versionado
+## Docker build & push a GHCR
+
+`docker-build-push-ghcr.yml` hace lo mismo que `docker-build-push.yml`, pero publica en **GitHub Container Registry** (`ghcr.io`). Es un archivo aparte: los proyectos que publican en Docker Hub no cambian.
+
+### 1. Pre-requisitos
+
+- No hacen falta secrets de Docker Hub: el login usa el `GITHUB_TOKEN` del job.
+- El job que llama al workflow debe declarar `packages: write`. Un workflow reutilizable no puede tener más permisos que su llamador.
+- Si el build descarga librerías de GitHub Packages (Maven o npm), el secret `GH_PACKAGES_TOKEN` (PAT clásico con `read:packages`) debe estar disponible para el repo.
+
+### 2. Crea `.github/workflows/release.yml`
+
+```yaml
+name: Build & Push to GHCR
+
+on:
+  push:
+    tags:
+      - "version-*"
+
+permissions:
+  contents: read
+
+jobs:
+  docker:
+    permissions:
+      contents: read
+      packages: write
+    uses: icgdesarrollo/ci-workflows/.github/workflows/docker-build-push-ghcr.yml@v1
+    with:
+      image-name: icgdesarrollo/NOMBRE_DE_LA_IMAGEN
+      image-title: Título de la imagen
+      image-description: Descripción corta
+    secrets: inherit
+```
+
+`image-name` va en minúsculas y **sin** el registro: el workflow publica en `ghcr.io/<image-name>`.
+
+### 3. Tags que se generan
+
+| Evento | Tags de la imagen |
+|---|---|
+| Push de tag `version-1.4.0-RC` | `version-1.4.0-RC` |
+| Push de tag `v1.4.0` | `v1.4.0` (y `latest` solo con `latest: true`) |
+| `workflow_dispatch` desde una rama | `sha-<commit corto>` |
+| Cualquiera con `extra-tag: dev` | además, `dev` |
+
+### 4. Inputs opcionales
+
+Los mismos de `docker-build-push.yml` (`context`, `platforms`, `build-args`, `vendor`, `extra-tag`, `push`, `runner`, `timeout-minutes`), con estas diferencias:
+
+| Input | Default | Descripción |
+|---|---|---|
+| `dockerfile` | vacío | Vacío usa el `Dockerfile` dentro de `context` (ej. `context: service` toma `service/Dockerfile`) |
+| `latest` | `false` | `true` agrega `latest` en tags `v*` que no sean `-rc`. Apagado por defecto porque con GitOps se despliega por tag de versión |
+| `maven-github-packages` | `false` | Pasa al build un `settings.xml` como secreto de BuildKit `maven_settings` |
+| `npm-github-packages` | `false` | Pasa `GH_PACKAGES_TOKEN` al build como secreto de BuildKit `npm_token` |
+
+En el Dockerfile, los secretos se montan con `--mount=type=secret` (nunca como `ARG`):
+
+```dockerfile
+# Maven
+RUN --mount=type=secret,id=maven_settings,target=/root/.m2/settings.xml ./mvnw -B package
+
+# pnpm: no lee el token del .npmrc del proyecto, hay que escribirlo en el del usuario
+RUN --mount=type=secret,id=npm_token,env=NODE_AUTH_TOKEN \
+    echo '//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}' > "$HOME/.npmrc" \
+    && pnpm install --frozen-lockfile
+```
+
+### 5. Después de la primera publicación
+
+El paquete nace **privado**. En la página del paquete, vincúlalo al repositorio y revisa quién tiene acceso. Para que un cluster lo descargue hace falta un pull secret con un PAT clásico `read:packages`.
+
+---
+
 
 Las versiones siguen [SemVer](https://semver.org/lang/es/) con dos tipos de tag:
 
