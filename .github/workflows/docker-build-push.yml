@@ -4,9 +4,13 @@ on:
   workflow_call:
     inputs:
       image-name:
-        description: "Repositorio en Docker Hub (namespace/nombre)"
+        description: "Repositorio de la imagen sin el registro (namespace/nombre). Para ghcr.io, en minusculas"
         type: string
         required: true
+      registry:
+        description: "Registro de destino: docker.io (por defecto) o ghcr.io"
+        type: string
+        default: "docker.io"
       image-title:
         type: string
         required: true
@@ -33,6 +37,14 @@ on:
         description: "Arma un settings.xml para GitHub Packages y lo pasa al build como secreto 'maven_settings'"
         type: boolean
         default: false
+      npm-github-packages:
+        description: "Pasa GH_PACKAGES_TOKEN al build como secreto 'npm_token' (paquetes npm de GitHub Packages)"
+        type: boolean
+        default: false
+      latest:
+        description: "Agrega el tag latest en tags v* que no sean -rc. Con GitOps (despliegue por tag de version) usar false"
+        type: boolean
+        default: true
       extra-tag:
         description: "Tag adicional opcional (ej. dev, test-123)"
         type: string
@@ -48,11 +60,13 @@ on:
         default: 30
     secrets:
       DOCKERHUB_USERNAME:
-        required: true
+        description: "Obligatorio si registry es docker.io y push es true"
+        required: false
       DOCKERHUB_TOKEN:
-        required: true
+        description: "Obligatorio si registry es docker.io y push es true"
+        required: false
       GH_PACKAGES_TOKEN:
-        description: "PAT clasico con read:packages. Obligatorio si maven-github-packages es true"
+        description: "PAT clasico con read:packages. Obligatorio si maven-github-packages o npm-github-packages es true"
         required: false
     outputs:
       digest:
@@ -62,8 +76,8 @@ on:
         description: "Tags generados"
         value: ${{ jobs.docker.outputs.tags }}
 
-permissions:
-  contents: read
+# Sin bloque permissions: el job usa los permisos que le da el llamador. Para docker.io basta
+# contents: read; para ghcr.io el llamador debe dar ademas packages: write (el login usa GITHUB_TOKEN).
 
 jobs:
   docker:
@@ -75,6 +89,40 @@ jobs:
       tags: ${{ steps.meta.outputs.tags }}
 
     steps:
+      - name: Validar entradas
+        env:
+          REGISTRY: ${{ inputs.registry }}
+          IMAGE: ${{ inputs.image-name }}
+          PUSH: ${{ inputs.push }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          NECESITA_TOKEN: ${{ inputs.maven-github-packages || inputs.npm-github-packages }}
+          GH_PACKAGES_TOKEN: ${{ secrets.GH_PACKAGES_TOKEN }}
+        run: |
+          case "$REGISTRY" in
+            docker.io)
+              if [ "$PUSH" = "true" ] && { [ -z "$DOCKERHUB_USERNAME" ] || [ -z "$DOCKERHUB_TOKEN" ]; }; then
+                echo "::error::registry es docker.io pero faltan los secretos DOCKERHUB_USERNAME y DOCKERHUB_TOKEN"
+                exit 1
+              fi
+              ;;
+            ghcr.io)
+              # GHCR rechaza nombres con mayusculas; el registro lo agrega este workflow.
+              if ! printf '%s' "$IMAGE" | grep -Eq '^[a-z0-9]+([._-][a-z0-9]+)*/[a-z0-9]+([._-][a-z0-9]+)*$'; then
+                echo "::error::para ghcr.io, image-name debe ser organizacion/nombre en minusculas y sin el registro (recibido: $IMAGE)"
+                exit 1
+              fi
+              ;;
+            *)
+              echo "::error::registry debe ser docker.io o ghcr.io (recibido: $REGISTRY)"
+              exit 1
+              ;;
+          esac
+          if [ "$NECESITA_TOKEN" = "true" ] && [ -z "$GH_PACKAGES_TOKEN" ]; then
+            echo "::error::maven-github-packages o npm-github-packages es true pero falta el secreto GH_PACKAGES_TOKEN"
+            exit 1
+          fi
+
       - name: Checkout
         uses: actions/checkout@v7
 
@@ -82,22 +130,30 @@ jobs:
         uses: docker/setup-buildx-action@v4
 
       - name: Log in to Docker Hub
-        if: inputs.push
+        if: inputs.push && inputs.registry == 'docker.io'
         uses: docker/login-action@v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Log in to GitHub Container Registry
+        if: inputs.push && inputs.registry == 'ghcr.io'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Extract image metadata
         id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ${{ inputs.image-name }}
+          images: ${{ inputs.registry == 'ghcr.io' && format('ghcr.io/{0}', inputs.image-name) || inputs.image-name }}
           flavor: |
             latest=false
           tags: |
             type=ref,event=tag
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-rc') }}
+            type=raw,value=latest,enable=${{ inputs.latest && startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-rc') }}
             type=sha,enable=${{ !startsWith(github.ref, 'refs/tags/') }}
             type=raw,value=${{ inputs.extra-tag }},enable=${{ inputs.extra-tag != '' }}
           labels: |
@@ -118,10 +174,6 @@ jobs:
           USUARIO: ${{ github.repository_owner }}
           TOKEN: ${{ secrets.GH_PACKAGES_TOKEN }}
         run: |
-          if [ -z "$TOKEN" ]; then
-            echo "::error::maven-github-packages es true pero falta el secreto GH_PACKAGES_TOKEN"
-            exit 1
-          fi
           umask 077
           cat > "${RUNNER_TEMP}/settings.xml" <<EOF
           <settings>
@@ -144,8 +196,9 @@ jobs:
           push: ${{ inputs.push }}
           platforms: ${{ inputs.platforms }}
           build-args: ${{ inputs.build-args }}
-          # Secreto y no build-arg: un build-arg queda en el historial de la imagen.
+          # Secretos y no build-args: un build-arg queda en el historial de la imagen.
           secret-files: ${{ inputs.maven-github-packages && format('maven_settings={0}/settings.xml', runner.temp) || '' }}
+          secrets: ${{ inputs.npm-github-packages && format('npm_token={0}', secrets.GH_PACKAGES_TOKEN) || '' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
@@ -155,7 +208,7 @@ jobs:
       - name: Write job summary
         if: always()
         env:
-          REPO: ${{ inputs.image-name }}
+          REPO: ${{ inputs.registry == 'ghcr.io' && format('ghcr.io/{0}', inputs.image-name) || inputs.image-name }}
           REF: ${{ github.ref_name }}
           DIGEST: ${{ steps.build.outputs.digest }}
           TAGS: ${{ steps.meta.outputs.tags }}

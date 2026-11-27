@@ -18,7 +18,7 @@ Configurar SonarCloud y CI en un proyecto nuevo solía requerir copiar y pegar 3
 | `sonar-node.yml` | SonarCloud para Node.js (JavaScript / TypeScript) | `v1.0.0` |
 | `sonar-python.yml` | SonarCloud para Python | `v1.0.0` |
 | `sonar-go.yml` | SonarCloud para Go | `v1.2.0` |
-| `docker-build-push.yml` | Build y push de imágenes a Docker Hub | `v1.0.0` |
+| `docker-build-push.yml` | Build y push de imágenes a Docker Hub o GHCR | `v1.0.0` |
 
 ## ¿Qué versión referenciar?
 
@@ -455,7 +455,7 @@ Confirma que existen `coverage.out` y `test-report.json`. En el log del job, el 
 
 ## Docker build & push
 
-`docker-build-push.yml` construye la imagen con Buildx y la publica en Docker Hub. No depende de SonarCloud.
+`docker-build-push.yml` construye la imagen con Buildx y la publica en Docker Hub o, con `registry: ghcr.io`, en GitHub Container Registry (ver el punto 5). No depende de SonarCloud.
 
 ### 1. Pre-requisitos
 
@@ -519,6 +519,65 @@ jobs:
 | `timeout-minutes` | `30` | Tiempo máximo del job |
 
 El workflow expone los outputs `digest` y `tags` para usarlos en jobs posteriores (por ejemplo, actualizar un manifiesto de despliegue).
+
+### 5. Publicar en GitHub Container Registry (GHCR)
+
+Desde `v2`, el mismo workflow publica en `ghcr.io` con el input `registry`. El valor por defecto sigue siendo `docker.io`, así que los proyectos que publican en Docker Hub no cambian nada.
+
+Pre-requisitos:
+
+- No hacen falta secrets de Docker Hub: el login usa el `GITHUB_TOKEN` del job.
+- El job que llama al workflow debe declarar `packages: write`. El workflow no fija permisos propios: usa los que le da el llamador.
+- Si el build descarga librerías de GitHub Packages (Maven o npm), el secret `GH_PACKAGES_TOKEN` (PAT clásico con `read:packages`) debe estar disponible para el repo.
+
+```yaml
+name: Build & Push to GHCR
+
+on:
+  push:
+    tags:
+      - "version-*"
+
+permissions:
+  contents: read
+
+jobs:
+  docker:
+    permissions:
+      contents: read
+      packages: write
+    uses: icgdesarrollo/ci-workflows/.github/workflows/docker-build-push.yml@v2
+    with:
+      registry: ghcr.io
+      image-name: icgdesarrollo/NOMBRE_DE_LA_IMAGEN
+      image-title: Título de la imagen
+      image-description: Descripción corta
+      latest: false
+    secrets: inherit
+```
+
+`image-name` va en minúsculas y **sin** el registro: el workflow publica en `ghcr.io/<image-name>`.
+
+| Input | Default | Descripción |
+|---|---|---|
+| `registry` | `docker.io` | `docker.io` o `ghcr.io` |
+| `latest` | `true` | `false` no agrega `latest`. Úsalo con GitOps, donde se despliega por tag de versión |
+| `maven-github-packages` | `false` | Pasa al build un `settings.xml` como secreto de BuildKit `maven_settings` |
+| `npm-github-packages` | `false` | Pasa `GH_PACKAGES_TOKEN` al build como secreto de BuildKit `npm_token` |
+
+En el Dockerfile, los secretos se montan con `--mount=type=secret` (nunca como `ARG`):
+
+```dockerfile
+# Maven
+RUN --mount=type=secret,id=maven_settings,target=/root/.m2/settings.xml ./mvnw -B package
+
+# pnpm: no lee el token del .npmrc del proyecto, hay que escribirlo en el del usuario
+RUN --mount=type=secret,id=npm_token,env=NODE_AUTH_TOKEN \
+    echo '//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}' > "$HOME/.npmrc" \
+    && pnpm install --frozen-lockfile
+```
+
+Después de la primera publicación el paquete nace **privado**: en la página del paquete, vincúlalo al repositorio y revisa quién tiene acceso. Para que un cluster lo descargue hace falta un pull secret con un PAT clásico `read:packages`.
 
 ---
 
